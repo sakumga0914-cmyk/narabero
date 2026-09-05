@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>並べろ。 v2</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#f6f6f6;color:#111}
+.wrap{max-width:560px;margin:auto;padding:22px 16px 40px}
+h1{font-size:36px;margin:8px 0 2px}
+p{margin:5px 0 18px;color:#555}
+.card{background:#fff;border-radius:18px;padding:16px;margin:14px 0;box-shadow:0 2px 12px #0000000c}
+button{display:block;width:100%;border:0;border-radius:14px;padding:15px;font-weight:700;font-size:17px;text-align:center;background:#111;color:white;margin:10px 0}
+.secondary{background:#e9e9e9;color:#111}
+.row{display:flex;gap:8px}
+.row button{flex:1}
+.active{outline:3px solid #999}
+#status{font-weight:700;margin-top:10px;white-space:pre-wrap}
+canvas{display:block;width:100%;height:auto;background:white;border-radius:10px}
+.small{font-size:12px;color:#777}
+.hidden{display:none}
+#files{
+  width:100%;
+  font-size:16px;
+  padding:12px;
+  border:1px solid #ddd;
+  border-radius:12px;
+  background:#fafafa;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>並べろ。</h1>
+<p>大量の写真を、黙って均等に並べます。</p>
+
+<div class="card">
+  <input id="files" type="file" accept="image/*,.heic,.heif,.jpg,.jpeg,.png,.webp" multiple>
+  <button id="pick">📷 写真を選ぶ</button>
+  <div id="status">まだ写真はありません</div>
+  <div class="small">画像はこの端末内で処理します。外部送信はしません。</div>
+</div>
+
+<div class="card">
+  <b>完成サイズ</b>
+  <div class="row">
+    <button class="ratio active" data-r="9:16">9:16</button>
+    <button class="ratio secondary" data-r="4:5">4:5</button>
+    <button class="ratio secondary" data-r="1:1">1:1</button>
+  </div>
+  <button id="make">▦ 並べろ。</button>
+</div>
+
+<div id="out" class="card hidden">
+  <canvas id="canvas"></canvas>
+  <button id="save">💾 PNGを保存</button>
+  <div id="gridinfo" class="small"></div>
+</div>
+</div>
+
+<script>
+let selected = [];
+let ratio = '9:16';
+const $ = s => document.querySelector(s);
+
+function updateFiles() {
+  const input = $('#files');
+  selected = Array.from(input.files || []);
+  $('#status').textContent = selected.length
+    ? `${selected.length}枚 選択しました`
+    : '選択結果が0枚です';
+}
+
+$('#pick').addEventListener('click', () => $('#files').click());
+$('#files').addEventListener('input', updateFiles);
+$('#files').addEventListener('change', updateFiles);
+
+document.querySelectorAll('.ratio').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.ratio').forEach(x => {
+      x.classList.remove('active');
+      x.classList.add('secondary');
+    });
+    b.classList.add('active');
+    b.classList.remove('secondary');
+    ratio = b.dataset.r;
+  };
+});
+
+function bestGrid(n, w, h) {
+  let best = null;
+  for (let c = 1; c <= n; c++) {
+    let r = Math.ceil(n / c);
+    let cw = w / c, ch = h / r;
+    let area = Math.min(cw, ch) ** 2;
+    let empty = r * c - n;
+    let score = area - empty * area * .02;
+    if (!best || score > best.score) best = {r, c, score};
+  }
+  return best;
+}
+
+async function fileToBitmap(file) {
+  if ('createImageBitmap' in window) {
+    try { return await createImageBitmap(file); } catch(e) {}
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return img;
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+}
+
+$('#make').onclick = async () => {
+  updateFiles();
+  if (!selected.length) {
+    alert('写真が0枚です。ChatGPT内のプレビューでは写真選択が渡らない場合があります。SafariでこのHTMLを開いて試してね。');
+    return;
+  }
+
+  $('#make').textContent = '並べ中…';
+  await new Promise(r => setTimeout(r, 20));
+
+  let [rw, rh] = ratio.split(':').map(Number);
+  let W = 1080, H = Math.round(W * rh / rw);
+  if (H > 1920) { H = 1920; W = Math.round(H * rw / rh); }
+
+  const cv = $('#canvas'), ctx = cv.getContext('2d');
+  cv.width = W; cv.height = H;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, W, H);
+
+  const g = bestGrid(selected.length, W, H);
+  const cw = W / g.c, ch = H / g.r;
+
+  for (let i = 0; i < selected.length; i++) {
+    try {
+      const im = await fileToBitmap(selected[i]);
+      const iw = im.width, ih = im.height;
+      const x = (i % g.c) * cw, y = Math.floor(i / g.c) * ch;
+      const scale = Math.max(cw / iw, ch / ih);
+      const sw = cw / scale, sh = ch / scale;
+      const sx = (iw - sw) / 2, sy = (ih - sh) / 2;
+      ctx.drawImage(im, sx, sy, sw, sh, x, y, cw + .5, ch + .5);
+      if (im.close) im.close();
+    } catch (e) {
+      console.warn('画像読み込み失敗', selected[i]?.name, e);
+    }
+  }
+
+  $('#gridinfo').textContent = `${selected.length}枚 / ${g.c}列 × ${g.r}行 / ${W}×${H}px`;
+  $('#out').classList.remove('hidden');
+  $('#make').textContent = '▦ 並べろ。';
+  $('#out').scrollIntoView({behavior:'smooth'});
+};
+
+$('#save').onclick = () => {
+  $('#canvas').toBlob(blob => {
+    if (!blob) return alert('保存用画像を作れませんでした');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `narabero_${Date.now()}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }, 'image/png');
+};
+</script>
+</body>
+</html>
