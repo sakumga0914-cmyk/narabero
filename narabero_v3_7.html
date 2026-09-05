@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>並べろ。</title>
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" type="image/png" href="icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="narabero.">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;background:#f6f6f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#171717}
+.wrap{max-width:760px;margin:auto;padding:8px 10px 22px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 1px 7px}
+.brand{font-size:25px;font-weight:900;letter-spacing:-.5px}
+.toptools{display:flex;gap:5px}
+.chip{border:1px solid #ddd;background:white;border-radius:9px;padding:6px 9px;font-weight:800;font-size:12px;color:#222}
+#stageWrap{background:#fff;border-radius:12px;padding:7px;box-shadow:0 1px 7px #0000000c}
+#stage{display:block;width:100%;height:auto;background:#eee;border:1px solid #bfc1c6;border-radius:4px;touch-action:manipulation}
+#empty{display:flex;align-items:center;justify-content:center;min-height:46vh;border:1px solid #bfc1c6;border-radius:4px;background:#fafafa;color:#999;font-size:14px}
+#controls{margin-top:7px}
+.row{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}
+.cmd{border:0;border-radius:10px;padding:9px 2px;font-size:18px;font-weight:900;line-height:1;background:white;box-shadow:0 1px 4px #00000010;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+#left{background:#dcecff} #right{background:#dcecff}
+#up{background:#e5dcff} #down{background:#e5dcff}
+#add{background:#fff0bd} #duplicate{background:#f4dcff}
+#undo{background:#ffdede} #save{background:#dcf5df}
+.actionrow{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.action{border:0;border-radius:9px;padding:8px;font-weight:800;font-size:13px;background:#222;color:#fff}
+#shuffle{background:#ececec;color:#222}
+#pick{background:#ef5f98}
+#status{font-size:11px;color:#777;text-align:center;margin-top:5px;min-height:14px}
+.hidden{display:none!important}
+input[type=file]{display:none}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">並べろ。 <span style="font-size:10px;color:#aaa;font-weight:700">narabero</span></div>
+    <div class="toptools">
+      <button id="ratio" class="chip">9:16</button>
+      <button id="mode" class="chip">隙間なく</button>
+    </div>
+  </div>
+
+  <div id="stageWrap">
+    <div id="empty">写真を選んで、並べろ。</div>
+    <canvas id="stage" class="hidden"></canvas>
+  </div>
+
+  <div id="controls">
+    <div class="row">
+      <button id="left" class="cmd">⬅️</button>
+      <button id="right" class="cmd">➡️</button>
+      <button id="up" class="cmd">⬆️</button>
+      <button id="down" class="cmd">⬇️</button>
+      <button id="add" class="cmd">➕</button>
+      <button id="duplicate" class="cmd">⧉</button>
+      <button id="undo" class="cmd">⤵️</button>
+      <button id="save" class="cmd">💾</button>
+    </div>
+    <div class="actionrow">
+      <button id="pick" class="action">写真を選ぶ</button>
+      <button id="shuffle" class="action">🔀 並べ直す</button>
+    </div>
+    <div id="status">完成フレームをタップして写真を選択</div>
+  </div>
+
+  <input id="files" type="file" accept="image/*" multiple>
+  <input id="addFile" type="file" accept="image/*">
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let items=[]; // {file,x,y}
+let selectedIndex=-1;
+let ratioIndex=0;
+let modeCover=true;
+let history=[];
+const ratios=[
+  {label:'9:16',w:1080,h:1920},
+  {label:'4:5',w:1080,h:1350},
+  {label:'1:1',w:1080,h:1080}
+];
+
+function snapshot(){
+  history.push({
+    items:items.map(it=>({file:it.file,x:it.x,y:it.y})),
+    selectedIndex, ratioIndex, modeCover
+  });
+  if(history.length>30) history.shift();
+}
+function restore(s){
+  items=s.items.map(it=>({file:it.file,x:it.x,y:it.y}));
+  selectedIndex=s.selectedIndex; ratioIndex=s.ratioIndex; modeCover=s.modeCover;
+  syncLabels(); draw();
+}
+function syncLabels(){
+  $('#ratio').textContent=ratios[ratioIndex].label;
+  $('#mode').textContent=modeCover?'隙間なく':'全部見せる';
+}
+function loadImage(file){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file), im=new Image();
+    im.onload=()=>{URL.revokeObjectURL(url);resolve(im)};
+    im.onerror=e=>{URL.revokeObjectURL(url);reject(e)};
+    im.src=url;
+  });
+}
+function rowPlan(n){
+  if(n<=0)return [];
+  const cols=Math.max(1,Math.round(Math.sqrt(n*0.62)));
+  const rows=Math.ceil(n/cols);
+  const base=Math.floor(n/rows), extra=n%rows;
+  const plan=[];
+  for(let r=0;r<rows;r++) plan.push(base+(r<extra?1:0));
+  return plan;
+}
+function coverRects(n,W,H){
+  const plan=rowPlan(n), rects=[];
+  let idx=0;
+  const rh=H/plan.length;
+  plan.forEach((count,r)=>{
+    const cw=W/count;
+    for(let c=0;c<count;c++){
+      rects.push({x:c*cw,y:r*rh,w:cw,h:rh,index:idx++});
+    }
+  });
+  return rects;
+}
+function containRects(ims,W,H){
+  const n=ims.length;
+  if(!n)return [];
+  // Choose row groups, then size each row from the photos' own aspect ratios.
+  const plan=rowPlan(n), groups=[];
+  let p=0;
+  for(const count of plan){
+    const group=[];
+    for(let i=0;i<count;i++,p++) group.push(p);
+    groups.push(group);
+  }
+  const naturalHeights=groups.map(g=>{
+    const sum=g.reduce((s,i)=>s+(ims[i].width/ims[i].height),0);
+    return W/Math.max(sum,.001);
+  });
+  const scaleY=H/naturalHeights.reduce((a,b)=>a+b,0);
+  const rects=[];
+  let y=0;
+  groups.forEach((g,gi)=>{
+    const rh=naturalHeights[gi]*scaleY;
+    const sumAR=g.reduce((s,i)=>s+(ims[i].width/ims[i].height),0);
+    let x=0;
+    g.forEach((i,k)=>{
+      const ar=ims[i].width/ims[i].height;
+      const rw=(k===g.length-1)?W-x:(W*ar/sumAR);
+      rects[i]={x,y,w:rw,h:rh,index:i};
+      x+=rw;
+    });
+    y+=rh;
+  });
+  return rects;
+}
+function rectsFor(n,W,H){
+  return coverRects(n,W,H);
+}
+async function draw(){
+  if(!items.length){
+    $('#stage').classList.add('hidden'); $('#empty').classList.remove('hidden');
+    $('#status').textContent='写真を選んで、並べろ。';
+    return;
+  }
+  $('#empty').classList.add('hidden'); $('#stage').classList.remove('hidden');
+  const c=$('#stage'), ctx=c.getContext('2d'), R=ratios[ratioIndex];
+  c.width=R.w;c.height=R.h;
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);
+  const ims=await Promise.all(items.map(it=>loadImage(it.file)));
+  const rects=modeCover
+    ? coverRects(items.length,c.width,c.height)
+    : containRects(ims,c.width,c.height);
+  c._naraberoRects=rects;
+  ims.forEach((im,i)=>{
+    const r=rects[i], it=items[i];
+    if(modeCover){
+      const scale=Math.max(r.w/im.width,r.h/im.height);
+      const sw=r.w/scale, sh=r.h/scale;
+      const mx=Math.max(0,im.width-sw), my=Math.max(0,im.height-sh);
+      const sx=Math.max(0,Math.min(mx,mx/2+(it.x||0)*mx/2));
+      const sy=Math.max(0,Math.min(my,my/2+(it.y||0)*my/2));
+      ctx.drawImage(im,sx,sy,sw,sh,r.x,r.y,r.w+.5,r.h+.5);
+    }else{
+      ctx.drawImage(im,r.x,r.y,r.w+.5,r.h+.5);
+    }
+  });
+  // thin canvas frame
+  ctx.strokeStyle='#9fa2a8';ctx.lineWidth=3;
+  ctx.strokeRect(1.5,1.5,c.width-3,c.height-3);
+  // selected cell frame
+  if(selectedIndex>=0 && rects[selectedIndex]){
+    const r=rects[selectedIndex];
+    ctx.strokeStyle='#ef5f98';ctx.lineWidth=8;
+    ctx.strokeRect(r.x+4,r.y+4,r.w-8,r.h-8);
+  }
+  $('#status').textContent=selectedIndex>=0
+    ? `選択中 ${selectedIndex+1}/${items.length}`
+    : `${items.length}枚`;
+}
+function selectFromCanvas(e){
+  if(!items.length)return;
+  const c=$('#stage'), box=c.getBoundingClientRect();
+  const x=(e.clientX-box.left)*c.width/box.width;
+  const y=(e.clientY-box.top)*c.height/box.height;
+  const rs=c._naraberoRects||coverRects(items.length,c.width,c.height);
+  const hit=rs.findIndex(r=>x>=r.x&&x<=r.x+r.w&&y>=r.y&&y<=r.y+r.h);
+  if(hit>=0){selectedIndex=hit;draw();}
+}
+function nudge(dx,dy){
+  if(selectedIndex<0)return $('#status').textContent='先に完成フレームの写真をタップ';
+  snapshot();
+  const it=items[selectedIndex];
+  it.x=Math.max(-1,Math.min(1,(it.x||0)+dx));
+  it.y=Math.max(-1,Math.min(1,(it.y||0)+dy));
+  draw();
+}
+$('#stage').addEventListener('click',selectFromCanvas);
+$('#left').onclick=()=>nudge(.16,0);
+$('#right').onclick=()=>nudge(-.16,0);
+$('#up').onclick=()=>nudge(0,.16);
+$('#down').onclick=()=>nudge(0,-.16);
+
+$('#ratio').onclick=()=>{snapshot();ratioIndex=(ratioIndex+1)%ratios.length;selectedIndex=-1;syncLabels();draw();};
+$('#mode').onclick=()=>{snapshot();modeCover=!modeCover;selectedIndex=-1;syncLabels();draw();};
+
+$('#pick').onclick=()=>$('#files').click();
+$('#files').onchange=()=>{
+  const fs=[...$('#files').files];
+  if(!fs.length)return;
+  snapshot();
+  items=fs.map(f=>({file:f,x:0,y:0})); selectedIndex=-1; draw();
+};
+
+$('#add').onclick=()=>{
+  if(!items.length)return $('#files').click();
+  $('#addFile').click();
+};
+$('#addFile').onchange=()=>{
+  const f=$('#addFile').files[0]; if(!f)return;
+  snapshot();
+  const at=selectedIndex>=0?selectedIndex+1:items.length;
+  items.splice(at,0,{file:f,x:0,y:0}); selectedIndex=at; $('#addFile').value=''; draw();
+};
+
+$('#duplicate').onclick=()=>{
+  if(selectedIndex<0)return $('#status').textContent='複製する写真をタップ';
+  snapshot();
+  const s=items[selectedIndex];
+  items.splice(selectedIndex+1,0,{file:s.file,x:s.x,y:s.y});
+  selectedIndex++;draw();
+};
+
+$('#shuffle').onclick=()=>{
+  if(items.length<2)return;
+  snapshot();
+  for(let i=items.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [items[i],items[j]]=[items[j],items[i]];
+  }
+  selectedIndex=-1;draw();
+};
+
+$('#undo').onclick=()=>{
+  const s=history.pop(); if(s)restore(s);
+};
+
+$('#save').onclick=async()=>{
+  if(!items.length)return;
+
+  const oldSelected=selectedIndex;
+  $('#status').textContent='書き出し中…';
+
+  try{
+    // 保存画像にはピンクの選択枠を入れない
+    selectedIndex=-1;
+    await draw();
+
+    const c=$('#stage');
+    const blob=await new Promise(resolve=>c.toBlob(resolve,'image/png'));
+    if(!blob) throw new Error('blob error');
+
+    const filename=`narabero_${ratios[ratioIndex].label.replace(':','x')}_${Date.now()}.png`;
+    const file=new File([blob],filename,{type:'image/png'});
+
+    // iPhone/Safariでは共有シート経由がいちばん確実
+    if(navigator.share && navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:'並べろ。'});
+      $('#status').textContent='書き出しました';
+    }else{
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url;
+      a.download=filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),3000);
+      $('#status').textContent='PNGを書き出しました';
+    }
+  }catch(e){
+    // 共有シートを閉じただけならエラー扱いしない
+    if(e && e.name==='AbortError'){
+      $('#status').textContent='書き出しをキャンセル';
+    }else{
+      console.error(e);
+      $('#status').textContent='書き出しに失敗しました';
+      alert('PNGを書き出せませんでした。');
+    }
+  }finally{
+    selectedIndex=oldSelected;
+    await draw();
+  }
+};
+
+syncLabels();
+</script>
+</body>
+</html>
